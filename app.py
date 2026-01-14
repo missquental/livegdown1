@@ -30,61 +30,107 @@ def extract_folder_id_from_url(url):
     return None
 
 def get_drive_video_list(folder_url):
-    """Mengambil daftar video dari folder Google Drive publik"""
+    """Mengambil daftar video dari folder Google Drive publik dengan nama asli"""
     try:
         folder_id = extract_folder_id_from_url(folder_url)
         if not folder_id:
             raise ValueError("URL Google Drive tidak valid")
-        
-        # URL untuk mengambil daftar file dari folder publik
-        url = f"https://drive.google.com/drive/folders/{folder_id}"
         
         # Headers untuk mensimulasikan browser
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        # Lakukan request pertama untuk mendapatkan konten
+        # URL untuk mengakses folder
+        url = f"https://drive.google.com/drive/folders/{folder_id}"
+        
+        # Lakukan request untuk mendapatkan konten
         response = requests.get(url, headers=headers)
         
         if response.status_code != 200:
             raise Exception(f"Gagal mengakses folder. Status code: {response.status_code}")
         
-        # Cari file ID menggunakan regex dari konten HTML
-        # Ini adalah pendekatan sederhana untuk folder publik
         content = response.text
-        
-        # Regex untuk mencari file-file dalam folder
-        # Mencari pola yang umum dalam Google Drive folder view
-        file_pattern = r'"(\d+/\w+/view\?id=([^"&]+))"'
-        matches = re.findall(file_pattern, content)
-        
         videos = []
-        processed_ids = set()  # Untuk menghindari duplikat
+        processed_ids = set()
         
-        for match in matches:
-            full_url, file_id = match
-            if file_id not in processed_ids:
-                processed_ids.add(file_id)
-                # Cek apakah file adalah video berdasarkan ekstensi dari URL
-                video_extensions = ['.mp4', '.flv', '.mov', '.avi', '.mkv', '.wmv']
-                if any(ext in full_url.lower() for ext in video_extensions) or \
-                   any(ext.replace('.', '') in full_url.lower() for ext in video_extensions):
-                    
-                    # Ekstrak nama file dari URL atau buat nama default
-                    name_match = re.search(r'id=([^&]+)', full_url)
-                    if name_match:
-                        filename = f"video_{file_id[:8]}"
+        # Pattern untuk mencari file dengan nama asli
+        patterns = [
+            r'"([^"]+)"\s*:\s*"application\/x-extension-(mp4|flv|mov|avi|mkv|wmv)"',
+            r'"([^"]+\.(mp4|flv|mov|avi|mkv|wmv))"',  # Nama file dengan ekstensi
+            r'data-tooltip="([^"]+\.(mp4|flv|mov|avi|mkv|wmv))"',  # Tooltip dengan nama file
+            r'title="([^"]+\.(mp4|flv|mov|avi|mkv|wmv))"',  # Title dengan nama file
+        ]
+        
+        found_matches = False
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, content)
+            for match in matches:
+                if isinstance(match, tuple):
+                    if len(match) >= 2 and match[0] and match[1]:
+                        # Format: (filename_with_ext, extension)
+                        filename = match[0]
+                        ext = match[1].lower()
+                    elif len(match) >= 1 and match[0]:
+                        # Format: (filename_with_ext,)
+                        filename = match[0]
+                        ext = filename.split('.')[-1].lower() if '.' in filename else 'mp4'
                     else:
-                        filename = f"video_{file_id[:8]}"
-                    
-                    # Periksa ekstensi dari nama file jika tersedia
-                    for ext in video_extensions:
-                        if ext.replace('.', '') in full_url.lower():
-                            filename = f"{filename}{ext}"
-                            break
+                        continue
+                else:
+                    # Format: filename_with_ext
+                    filename = match
+                    ext = filename.split('.')[-1].lower() if '.' in filename else 'mp4'
+                
+                # Ekstrak ID dari filename atau cari ID terpisah
+                file_id = None
+                
+                # Cari ID menggunakan regex tambahan
+                id_search_pattern = rf'"{re.escape(filename)}"[^{{}}]*?"id":"([^"]+)"'
+                id_match = re.search(id_search_pattern, content)
+                if id_match:
+                    file_id = id_match.group(1)
+                
+                # Jika tidak ketemu, coba pattern umum
+                if not file_id:
+                    general_id_pattern = r'"([^"]{20,})"'
+                    general_ids = re.findall(general_id_pattern, content)
+                    if general_ids:
+                        file_id = general_ids[0]  # Gunakan ID pertama sebagai fallback
+                
+                if file_id and file_id not in processed_ids and len(file_id) > 20:
+                    processed_ids.add(file_id)
+                    video_info = {
+                        'title': filename,
+                        'id': file_id,
+                        'url': f"https://drive.google.com/file/d/{file_id}/view"
+                    }
+                    videos.append(video_info)
+                    found_matches = True
+        
+        # Jika metode di atas tidak berhasil, gunakan pendekatan alternatif
+        if not found_matches:
+            # Cari semua ID panjang yang kemungkinan adalah file ID
+            id_pattern = r'"([a-zA-Z0-9_-]{20,})"'
+            ids = re.findall(id_pattern, content)
+            
+            # Cari nama file secara terpisah
+            name_pattern = r'"([^"]+\.(mp4|flv|mov|avi|mkv|wmv))"'
+            names = re.findall(name_pattern, content)
+            
+            # Gabungkan informasi
+            for i, file_id in enumerate(ids[:len(names)] if names else ids[:10]):  # Batasi 10 file
+                if file_id not in processed_ids and len(file_id) > 20:
+                    processed_ids.add(file_id)
+                    # Gunakan nama dari list names jika tersedia, atau buat nama default
+                    if i < len(names):
+                        if isinstance(names[i], tuple):
+                            filename = names[i][0]
+                        else:
+                            filename = names[i]
                     else:
-                        filename = f"{filename}.mp4"  # default extension
+                        filename = f"Part_{i+1}.mp4"  # Default naming
                     
                     video_info = {
                         'title': filename,
@@ -93,30 +139,15 @@ def get_drive_video_list(folder_url):
                     }
                     videos.append(video_info)
         
-        # Jika metode regex tidak berhasil, coba pendekatan alternatif
-        if not videos:
-            # Cari menggunakan pattern lain
-            id_patterns = [
-                r'"([^"]+)"\s*:\s*"application\/x-extension-[^"]+"',
-                r'data-id="([^"]+)"',
-                r'"id"\s*:\s*"([^"]+)"[^}]*"mimeType"\s*:\s*"video\/[^"]+"',
-                r'\\u003d([^\\]+)\\u0026export'
-            ]
-            
-            for pattern in id_patterns:
-                ids = re.findall(pattern, content)
-                for file_id in ids:
-                    if file_id and len(file_id) > 20 and file_id not in processed_ids:  # Filter ID yang valid
-                        processed_ids.add(file_id)
-                        filename = f"video_{file_id[:8]}.mp4"
-                        video_info = {
-                            'title': filename,
-                            'id': file_id,
-                            'url': f"https://drive.google.com/file/d/{file_id}/view"
-                        }
-                        videos.append(video_info)
+        # Hapus duplikat berdasarkan title
+        unique_videos = []
+        seen_titles = set()
+        for video in videos:
+            if video['title'] not in seen_titles:
+                seen_titles.add(video['title'])
+                unique_videos.append(video)
         
-        return videos
+        return unique_videos
         
     except Exception as e:
         st.error(f"Gagal mengambil daftar video dari Google Drive: {str(e)}")
@@ -264,6 +295,9 @@ def main():
                             st.session_state.drive_videos = drive_videos
                             if drive_videos:
                                 st.success(f"Berhasil mengambil {len(drive_videos)} video dari folder!")
+                                # Debug info
+                                debug_info = [f"{v['title']} (ID: {v['id']})" for v in drive_videos[:5]]
+                                st.caption("Beberapa file pertama: " + ", ".join(debug_info))
                             else:
                                 st.warning("Tidak menemukan video dalam folder. Pastikan folder publik dan berisi file video.")
                         except Exception as e:
@@ -279,6 +313,9 @@ def main():
             video_files = [v for v in st.session_state.drive_videos if v['title'].lower().endswith(('.mp4', '.flv', '.mov', '.avi', '.mkv'))]
             
             if video_files:
+                # Urutkan berdasarkan nama file
+                video_files.sort(key=lambda x: x['title'])
+                
                 video_titles = [v['title'] for v in video_files]
                 selected_drive_title = st.selectbox("Pilih video dari Drive", video_titles, key="drive_select")
                 
@@ -291,15 +328,24 @@ def main():
                 
                 if selected_video_info:
                     st.info(f"File ID: {selected_video_info['id']}")
-                    st.info(f"URL: {selected_video_info['url']}")
+                    st.info(f"Nama File Asli: {selected_video_info['title']}")
                     
                     if st.button("📥 Download dan Gunakan Video Ini"):
-                        with st.spinner("Mendownload video..."):
-                            filename = f"downloaded_{selected_video_info['title']}"
+                        with st.spinner(f"Mendownload video: {selected_video_info['title']}"):
+                            # Gunakan nama file asli untuk download
+                            filename = selected_video_info['title']
+                            # Pastikan nama file unik jika sudah ada
+                            counter = 1
+                            original_filename = filename
+                            while os.path.exists(filename):
+                                name_part, ext = os.path.splitext(original_filename)
+                                filename = f"{name_part}_{counter}{ext}"
+                                counter += 1
+                            
                             if download_video_from_drive(selected_video_info['id'], filename):
                                 st.session_state.downloaded_video_path = filename
                                 st.session_state.selected_drive_video = selected_video_info['title']
-                                st.success(f"Video '{selected_video_info['title']}' berhasil didownload!")
+                                st.success(f"Video '{selected_video_info['title']}' berhasil didownload sebagai '{filename}'!")
                             else:
                                 st.error("Gagal mendownload video. Coba lagi atau gunakan metode manual.")
             else:
@@ -386,7 +432,7 @@ def main():
         1. **Masuk ke Tab "Video Google Drive"**
         2. **Pastikan URL folder sudah benar** (default sudah terisi)
         3. **Klik tombol "🔄 Ambil Daftar Video dari Folder"**
-        4. **Tunggu sampai daftar video muncul**
+        4. **Tunggu sampai daftar video muncul dengan nama asli**
         5. **Pilih video yang ingin digunakan**
         6. **Klik "📥 Download dan Gunakan Video Ini"**
         7. **Isi Stream Key YouTube**
@@ -394,8 +440,8 @@ def main():
         
         **Catatan:**
         - Folder harus dalam mode "publik" atau "siapa pun dengan link dapat melihat"
-        - Proses pengambilan daftar mungkin memakan waktu beberapa detik
-        - Video akan otomatis didownload ke direktori lokal saat dipilih
+        - Video akan didownload dengan nama file asli (misal: Part_1.mp4)
+        - File yang sama akan ditambahkan suffix angka jika sudah ada
         """)
 
 if __name__ == '__main__':
